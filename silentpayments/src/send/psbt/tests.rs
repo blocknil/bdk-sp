@@ -118,7 +118,7 @@ fn get_sp_derivations(
     )
     .expect("should succeed");
 
-    create_silentpayment_scriptpubkeys(partial_secret, sp_codes)
+    create_silentpayment_scriptpubkeys(partial_secret, sp_codes).unwrap()
 }
 
 mod derive_sp {

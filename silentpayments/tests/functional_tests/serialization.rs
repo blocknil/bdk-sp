@@ -157,6 +157,21 @@ pub struct OutputWithSignature {
 #[derive(Debug, Deserialize)]
 struct RecipientMap {
     address: String,
+    count: Option<usize>,
+}
+
+trait PaymentCodeSource: AsRef<str> {
+    fn count(&self) -> usize {
+        1
+    }
+}
+
+impl PaymentCodeSource for String {}
+
+impl PaymentCodeSource for RecipientMap {
+    fn count(&self) -> usize {
+        self.count.unwrap_or(1)
+    }
 }
 
 impl AsRef<str> for RecipientMap {
@@ -170,12 +185,14 @@ fn deserialize_silentpayment_code<'de, D, T>(
 ) -> Result<Vec<SilentPaymentCode>, D::Error>
 where
     D: serde::Deserializer<'de>,
-    T: Deserialize<'de> + AsRef<str>,
+    T: Deserialize<'de> + PaymentCodeSource,
 {
-    Vec::<T>::deserialize(deserializer)?
-        .iter()
-        .map(|item| SilentPaymentCode::try_from(item.as_ref()).map_err(D::Error::custom))
-        .collect()
+    let mut codes = Vec::new();
+    for item in Vec::<T>::deserialize(deserializer)? {
+        let code = SilentPaymentCode::try_from(item.as_ref()).map_err(D::Error::custom)?;
+        codes.extend(std::iter::repeat_n(code, item.count()));
+    }
+    Ok(codes)
 }
 
 fn deserialize_signature<'de, D>(deserializer: D) -> Result<ScriptBuf, D::Error>

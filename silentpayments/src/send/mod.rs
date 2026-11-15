@@ -71,10 +71,22 @@ pub fn create_silentpayment_partial_secret(
         .expect("computationally unreachable: can only fail if a_sum is invalid or input_hash is"))
 }
 
+/// Derives output keys, rejecting a scan-key group that exceeds the BIP352 recipient limit.
+///
+/// The limit is checked before deriving any output, including across labelled codes that share
+/// a scan public key. An oversized group returns [`SpSendError::RecipientLimitExceeded`].
 pub fn create_silentpayment_scriptpubkeys(
     partial_secret: SecretKey,
     outputs: &[SilentPaymentCode],
-) -> HashMap<SilentPaymentCode, Vec<XOnlyPublicKey>> {
+) -> Result<HashMap<SilentPaymentCode, Vec<XOnlyPublicKey>>, SpSendError> {
+    let mut group_sizes = HashMap::<PublicKey, u32>::new();
+    for code in outputs {
+        let size = group_sizes.entry(code.scan).or_default();
+        if *size == crate::receive::K_MAX {
+            return Err(SpSendError::RecipientLimitExceeded(crate::receive::K_MAX));
+        }
+        *size += 1;
+    }
     let secp = Secp256k1::new();
 
     // Cache to avoid recomputing ecdh shared secret for each B_scan and track the k to get the
@@ -111,7 +123,7 @@ pub fn create_silentpayment_scriptpubkeys(
         }
     }
 
-    payments
+    Ok(payments)
 }
 
 #[cfg(test)]
@@ -370,10 +382,46 @@ mod tests {
         use std::str::FromStr;
 
         #[test]
+        fn exactly_k_max_recipients_are_allowed() {
+            let (partial, codes) = setup_test_data();
+            let recipients = vec![codes[0].clone(); crate::receive::K_MAX as usize];
+            let outputs = create_silentpayment_scriptpubkeys(partial, &recipients).unwrap();
+            assert_eq!(outputs[&codes[0]].len(), crate::receive::K_MAX as usize);
+        }
+
+        #[test]
+        fn k_max_plus_one_recipients_are_rejected() {
+            let (partial, codes) = setup_test_data();
+            let recipients = vec![codes[0].clone(); crate::receive::K_MAX as usize + 1];
+            assert!(matches!(
+                create_silentpayment_scriptpubkeys(partial, &recipients),
+                Err(crate::send::error::SpSendError::RecipientLimitExceeded(limit)) if limit == crate::receive::K_MAX
+            ));
+        }
+
+        #[test]
+        fn labelled_codes_share_a_limit_but_distinct_scan_keys_do_not() {
+            let (partial, codes) = setup_test_data();
+            assert_eq!(codes[0].scan, codes[2].scan);
+            assert_ne!(codes[0].scan, codes[1].scan);
+            let mut recipients = vec![codes[0].clone(); crate::receive::K_MAX as usize];
+            recipients.push(codes[2].clone());
+            assert!(matches!(
+                create_silentpayment_scriptpubkeys(partial, &recipients),
+                Err(crate::send::error::SpSendError::RecipientLimitExceeded(_))
+            ));
+            recipients.pop();
+            recipients.extend(vec![codes[1].clone(); crate::receive::K_MAX as usize]);
+            let outputs = create_silentpayment_scriptpubkeys(partial, &recipients).unwrap();
+            assert_eq!(outputs[&codes[0]].len(), crate::receive::K_MAX as usize);
+            assert_eq!(outputs[&codes[1]].len(), crate::receive::K_MAX as usize);
+        }
+
+        #[test]
         fn three_outputs_all_different() {
             let (partial_secret, sp_codes) = setup_test_data();
 
-            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes);
+            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes).unwrap();
 
             assert_eq!(result.len(), 3);
 
@@ -388,7 +436,8 @@ mod tests {
             let (partial_secret, _) = setup_test_data();
             let empty_outputs: Vec<SilentPaymentCode> = vec![];
 
-            let result = create_silentpayment_scriptpubkeys(partial_secret, &empty_outputs);
+            let result =
+                create_silentpayment_scriptpubkeys(partial_secret, &empty_outputs).unwrap();
 
             assert!(result.is_empty());
         }
@@ -399,7 +448,7 @@ mod tests {
 
             assert_eq!(sp_codes[0].scan, sp_codes[2].scan);
 
-            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes);
+            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes).unwrap();
 
             // Get the pubkeys for codes with the same scan key
             let pubkeys_1 = &result[&sp_codes[0]];
@@ -415,8 +464,8 @@ mod tests {
             let (partial_secret, sp_codes) = setup_test_data();
 
             // Generate sp_codes twice with the same inputs
-            let result_1 = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes);
-            let result_2 = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes);
+            let result_1 = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes).unwrap();
+            let result_2 = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes).unwrap();
 
             // Results should be identical
             assert_eq!(result_1.len(), result_2.len());
@@ -433,7 +482,7 @@ mod tests {
             // Add a duplicate of the first code
             sp_codes.push(sp_codes[0].clone());
 
-            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes);
+            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes).unwrap();
 
             // Should still have only 3 unique entries
             assert_eq!(result.len(), 3);
@@ -462,7 +511,7 @@ mod tests {
                 sp_codes.push(code);
             }
 
-            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes);
+            let result = create_silentpayment_scriptpubkeys(partial_secret, &sp_codes).unwrap();
 
             // Should have generated the correct number of sp_codes
             assert_eq!(result.len(), 100);
@@ -480,8 +529,8 @@ mod tests {
             let partial_secret_2 =
                 SecretKey::from_str(PARTIAL_SECRET_2).expect("creating from constant");
 
-            let result_1 = create_silentpayment_scriptpubkeys(partial_secret_1, &sp_codes);
-            let result_2 = create_silentpayment_scriptpubkeys(partial_secret_2, &sp_codes);
+            let result_1 = create_silentpayment_scriptpubkeys(partial_secret_1, &sp_codes).unwrap();
+            let result_2 = create_silentpayment_scriptpubkeys(partial_secret_2, &sp_codes).unwrap();
 
             // Results should be different with different partial secrets
             for sp_code in &sp_codes {
