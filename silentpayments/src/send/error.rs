@@ -22,6 +22,8 @@ pub enum SpSendError {
     MissingDerivations,
     /// There are not enough outputs for the silent payments derived
     MissingOutputs,
+    /// A group sharing one scan public key exceeds the BIP352 recipient limit.
+    RecipientLimitExceeded(u32),
 }
 
 impl From<crate::LexMinError> for SpSendError {
@@ -51,6 +53,7 @@ impl From<bitcoin::blockdata::transaction::OutputsIndexError> for SpSendError {
 impl std::fmt::Display for SpSendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RecipientLimitExceeded(limit) => write!(f, "Silent payment sending error: per-group recipient limit {limit} exceeded"),
             Self::Bip32Error(e) => write!(f, "Silent payment sending error: {e}"),
             Self::Secp256k1Error(e) => write!(f, "Silent payment sending error: {e}"),
             Self::IndexError(e) => write!(f, "From PSBT: {e}"),
