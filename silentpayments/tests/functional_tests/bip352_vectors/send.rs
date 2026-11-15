@@ -177,7 +177,6 @@ fn input_keys_sum_up_to_zero_point_at_infinity_sending_fails_receiver_skips_tx()
 }
 
 #[test]
-#[ignore = "currently fails due to intermediate sum being zero"]
 fn input_keys_intermediate_sum_is_zero_but_final_sum_is_non_zero() {
     check_cases(26);
 }

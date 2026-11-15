@@ -45,12 +45,21 @@ pub fn create_silentpayment_partial_secret(
         return Err(SpSendError::MissingInputsForSharedSecretDerivation);
     }
 
-    // Use first derived_secret key to initialize a_sum
-    let mut a_sum = available_keys[0];
-    // Then skip first element to avoid reuse
-    for sk in available_keys.iter().skip(1) {
-        a_sum = a_sum.add_tweak(&Scalar::from(*sk))?;
+    // A zero intermediate sum is valid; only the final sum must be nonzero. SecretKey cannot
+    // represent zero, so None represents that additive identity between libsecp256k1 operations.
+    let mut a_sum: Option<SecretKey> = None;
+    for sk in available_keys {
+        a_sum = match a_sum {
+            None => Some(sk),
+            Some(sum) => match sum.add_tweak(&Scalar::from(sk)) {
+                Ok(sum) => Some(sum),
+                // The scalar comes from a valid SecretKey, so this error means the sum is zero.
+                Err(bitcoin::secp256k1::Error::InvalidTweak) => None,
+                Err(error) => return Err(error.into()),
+            },
+        };
     }
+    let a_sum = a_sum.ok_or(bitcoin::secp256k1::Error::InvalidTweak)?;
 
     #[allow(non_snake_case)]
     let A_sum = a_sum.public_key(&secp);
@@ -297,6 +306,60 @@ mod tests {
                 .expect_err("should fail");
 
             assert_eq!("Silent payment sending error: bad tweak", error.to_string());
+        }
+
+        #[test]
+        fn intermediate_zero_is_independent_of_input_order() {
+            let secp = Secp256k1::new();
+            let a = SecretKey::from_slice(&[1; 32]).unwrap();
+            let b = SecretKey::from_slice(&[2; 32]).unwrap();
+            let pair = |key: SecretKey| {
+                let public = key.public_key(&secp);
+                (
+                    ScriptBuf::new_p2wpkh(&WPubkeyHash::hash(&public.serialize())),
+                    key,
+                )
+            };
+            let minimum = get_smallest_outpoint();
+            let expected = create_silentpayment_partial_secret(&minimum, &[pair(b)]).unwrap();
+            let keys = [a, a.negate(), b];
+            for order in [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ] {
+                let inputs = order.map(|index| pair(keys[index]));
+                assert_eq!(
+                    create_silentpayment_partial_secret(&minimum, &inputs).unwrap(),
+                    expected
+                );
+            }
+        }
+
+        #[test]
+        fn repeated_zero_intermediates_preserve_final_zero_rejection() {
+            let secp = Secp256k1::new();
+            let a = SecretKey::from_slice(&[1; 32]).unwrap();
+            let b = SecretKey::from_slice(&[2; 32]).unwrap();
+            let c = SecretKey::from_slice(&[3; 32]).unwrap();
+            let pair = |key: SecretKey| {
+                let public = key.public_key(&secp);
+                (
+                    ScriptBuf::new_p2wpkh(&WPubkeyHash::hash(&public.serialize())),
+                    key,
+                )
+            };
+            let minimum = get_smallest_outpoint();
+            let inputs = [a, a.negate(), b, b.negate(), c].map(pair);
+            let expected = create_silentpayment_partial_secret(&minimum, &[pair(c)]).unwrap();
+            assert_eq!(
+                create_silentpayment_partial_secret(&minimum, &inputs).unwrap(),
+                expected
+            );
+            assert!(create_silentpayment_partial_secret(&minimum, &inputs[..4]).is_err());
         }
     }
 
